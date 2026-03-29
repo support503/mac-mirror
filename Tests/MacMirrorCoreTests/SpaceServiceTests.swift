@@ -62,11 +62,34 @@ struct SpaceServiceTests {
         #expect(resolved.uuid == "SPACE-A")
     }
 
-    private func hotkey(enabled: Bool, keyCode: Int) -> [String: Any] {
+    @Test
+    func directDesktopHotkeyReadsConfiguredShortcut() throws {
+        let service = SpaceService()
+
+        let hotkey = try #require(service.directDesktopHotkey(for: 3, in: [
+            "AppleSymbolicHotKeys": [
+                "120": hotkey(enabled: true, keyCode: 20, modifiers: 262144),
+            ]
+        ]))
+
+        #expect(hotkey.keyCode == 20)
+        #expect(hotkey.modifiers == 262144)
+    }
+
+    @Test
+    func cgEventFlagsIncludeSecondaryFunctionWhenConfigured() {
+        let service = SpaceService()
+        let flags = service.cgEventFlags(from: 8650752)
+
+        #expect(flags.contains(.maskControl))
+        #expect(flags.contains(.maskSecondaryFn))
+    }
+
+    private func hotkey(enabled: Bool, keyCode: Int, modifiers: Int = 8650752) -> [String: Any] {
         [
             "enabled": enabled,
             "value": [
-                "parameters": [65535, keyCode, 8650752],
+                "parameters": [65535, keyCode, modifiers],
             ],
         ]
     }

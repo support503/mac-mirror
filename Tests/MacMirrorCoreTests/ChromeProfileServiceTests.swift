@@ -52,4 +52,30 @@ struct ChromeProfileServiceTests {
         #expect(profiles.first?.windowPlacement?.x == 100)
         #expect(profiles.first?.windowPlacement?.width == 1500)
     }
+
+    @Test
+    func resolvesCrashRecoveryModeFromChromePreferences() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Profile 1"), withIntermediateDirectories: true)
+
+        let preferences = """
+        {
+          "profile": {
+            "exit_type": "Crashed"
+          }
+        }
+        """
+        try preferences.data(using: .utf8)?.write(to: root.appendingPathComponent("Profile 1/Preferences"))
+
+        let service = ChromeProfileService(
+            chromeSupportDirectory: root,
+            chromeApplicationURL: URL(fileURLWithPath: "/Applications/Google Chrome.app")
+        )
+
+        #expect(service.loadExitType(profileDirectory: "Profile 1") == .crashed)
+        #expect(service.restoreMode(for: "Profile 1", chromeWasRunningAtStart: false) == .crashSessionRecovery)
+        #expect(service.restoreMode(for: "Profile 1", chromeWasRunningAtStart: true) == .normalStartup)
+    }
 }

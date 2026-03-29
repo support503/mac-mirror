@@ -44,7 +44,7 @@ final class AppViewModel: ObservableObject {
         refresh()
     }
 
-    func refresh() {
+    func refresh(statusOverride: String? = nil) {
         do {
             _ = try? environment.runtimeInstaller.installSiblingToolsIfAvailable()
             settings = try environment.snapshotStore.loadSettings()
@@ -57,7 +57,7 @@ final class AppViewModel: ObservableObject {
             if snapshotName.isEmpty {
                 snapshotName = defaultSnapshotName()
             }
-            statusMessage = "Loaded \(snapshots.count) snapshot(s)."
+            statusMessage = statusOverride ?? "Loaded \(snapshots.count) snapshot(s)."
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -85,8 +85,7 @@ final class AppViewModel: ObservableObject {
             }
             try environment.snapshotStore.saveSettings(settings)
             selectedSnapshotID = snapshot.id
-            statusMessage = "Saved snapshot '\(resolvedName)'."
-            refresh()
+            refresh(statusOverride: "Saved snapshot '\(resolvedName)' with \(snapshot.detailedTargetSummary).")
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -116,8 +115,7 @@ final class AppViewModel: ObservableObject {
                 notes: fresh.notes
             )
             try environment.snapshotStore.saveSnapshot(updated)
-            statusMessage = "Updated snapshot '\(existing.name)'."
-            refresh()
+            refresh(statusOverride: "Updated snapshot '\(existing.name)' with \(updated.detailedTargetSummary).")
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -125,18 +123,18 @@ final class AppViewModel: ObservableObject {
 
     func restorePinned() {
         performAsync("Restoring pinned snapshot...") {
-            try self.environment.restoreCoordinator.restorePinnedSnapshot()
+            let report = try self.environment.restoreCoordinator.restorePinnedSnapshot()
             await MainActor.run {
-                self.statusMessage = "Pinned snapshot restored."
+                self.statusMessage = report.summaryLine
             }
         }
     }
 
     func restore(snapshot: Snapshot) {
         performAsync("Restoring \(snapshot.name)...") {
-            try self.environment.restoreCoordinator.restore(snapshot: snapshot)
+            let report = try self.environment.restoreCoordinator.restore(snapshot: snapshot)
             await MainActor.run {
-                self.statusMessage = "Restored '\(snapshot.name)'."
+                self.statusMessage = report.summaryLine
             }
         }
     }
@@ -145,8 +143,30 @@ final class AppViewModel: ObservableObject {
         do {
             try environment.snapshotStore.pinSnapshot(idOrName: snapshot.id.uuidString)
             settings.pinnedSnapshotID = snapshot.id
-            statusMessage = "Pinned '\(snapshot.name)'."
-            refresh()
+            refresh(statusOverride: "Pinned '\(snapshot.name)'.")
+        } catch {
+            statusMessage = error.localizedDescription
+        }
+    }
+
+    func delete(snapshot: Snapshot) {
+        do {
+            try environment.snapshotStore.deleteSnapshot(idOrName: snapshot.id.uuidString)
+
+            var updatedSettings = try environment.snapshotStore.loadSettings()
+            if updatedSettings.pinnedSnapshotID == snapshot.id {
+                updatedSettings.pinnedSnapshotID = nil
+            }
+            if updatedSettings.lastSavedSnapshotID == snapshot.id {
+                updatedSettings.lastSavedSnapshotID = nil
+            }
+            try environment.snapshotStore.saveSettings(updatedSettings)
+
+            if selectedSnapshotID == snapshot.id {
+                selectedSnapshotID = nil
+            }
+            settings = updatedSettings
+            refresh(statusOverride: "Deleted '\(snapshot.name)'.")
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -176,8 +196,7 @@ final class AppViewModel: ObservableObject {
             do {
                 let snapshot = try environment.snapshotStore.importSnapshot(from: url)
                 selectedSnapshotID = snapshot.id
-                statusMessage = "Imported '\(snapshot.name)'."
-                refresh()
+                refresh(statusOverride: "Imported '\(snapshot.name)' with \(snapshot.detailedTargetSummary).")
             } catch {
                 statusMessage = error.localizedDescription
             }
@@ -432,6 +451,8 @@ struct SettingsWindowView: View {
                         .contextMenu {
                             Button("Restore") { model.restore(snapshot: snapshot) }
                             Button("Pin as Default") { model.pin(snapshot: snapshot) }
+                            Divider()
+                            Button("Delete Snapshot") { model.delete(snapshot: snapshot) }
                         }
                     }
                 }
@@ -452,6 +473,11 @@ struct SettingsWindowView: View {
                 Button("Pin Selected") {
                     if let snapshot = model.selectedSnapshot {
                         model.pin(snapshot: snapshot)
+                    }
+                }
+                Button("Delete Selected") {
+                    if let snapshot = model.selectedSnapshot {
+                        model.delete(snapshot: snapshot)
                     }
                 }
                 Spacer()
@@ -522,8 +548,17 @@ struct SnapshotQuickActionRow: View {
     let action: () -> Void
 
     var body: some View {
-        HStack {
-            Button(snapshot.name, action: action)
+        HStack(alignment: .top) {
+            Button(action: action) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(snapshot.name)
+                    Text(snapshot.shortTargetSummary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
             Spacer()
             if snapshot.id == pinnedSnapshotID {
                 Image(systemName: "pin.fill")
@@ -545,9 +580,12 @@ struct SnapshotSelectionCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(snapshot.name)
                         .foregroundStyle(.primary)
-                    Text(snapshot.updatedAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Text(snapshot.updatedAt.formatted(date: .abbreviated, time: .shortened))
+                        Text(snapshot.shortTargetSummary)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if isPinned {

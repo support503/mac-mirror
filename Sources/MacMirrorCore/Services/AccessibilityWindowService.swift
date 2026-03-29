@@ -35,25 +35,62 @@ public final class AccessibilityWindowService: Sendable {
         }
     }
 
-    public func clickChromeRestoreButtonIfPresent() {
+    @discardableResult
+    public func clickChromeRestoreButtonIfPresent() -> Bool {
         let script = """
+        set frontWindowName to ""
         tell application "System Events"
-            if not (exists process "Google Chrome") then return
+            if not (exists process "Google Chrome") then return ""
             tell process "Google Chrome"
                 repeat with w in windows
                     if exists button "Restore" of w then
                         click button "Restore" of w
-                        return
+                        return "Restore"
                     end if
                     if exists button "Restore pages" of w then
                         click button "Restore pages" of w
-                        return
+                        return "Restore pages"
                     end if
                 end repeat
+
+                try
+                    set restoreButtons to (every button of entire contents whose name is "Restore" or name is "Restore pages")
+                    if (count of restoreButtons) > 0 then
+                        set restoreButton to item 1 of restoreButtons
+                        set buttonName to name of restoreButton
+                        click restoreButton
+                        return buttonName
+                    end if
+                end try
+
+                try
+                    if exists front window then
+                        set frontWindowName to name of front window
+                    end if
+                end try
             end tell
         end tell
+        return ""
         """
-        _ = try? Shell.run("/usr/bin/osascript", arguments: ["-e", script])
+        let result = try? Shell.run("/usr/bin/osascript", arguments: ["-e", script])
+        let output = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return output.isEmpty == false
+    }
+
+    @discardableResult
+    public func pressChromeRestoreDefaultAction() -> Bool {
+        let script = """
+        tell application "System Events"
+            if not (exists process "Google Chrome") then return ""
+        end tell
+        tell application "Google Chrome" to activate
+        delay 0.5
+        tell application "System Events" to key code 36
+        return "Return"
+        """
+        let result = try? Shell.run("/usr/bin/osascript", arguments: ["-e", script])
+        let output = result?.stdout.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return output.isEmpty == false
     }
 
     private func findMatchingWindow(
@@ -81,13 +118,29 @@ public final class AccessibilityWindowService: Sendable {
 
     private func score(window: WindowGeometry, title: String?, target: WindowGeometry, targetTitle: String?) -> Double {
         let framePenalty = window.distance(to: target)
+        let transientPenalty: Double = isLikelyTransientChromeWindow(title: title, geometry: window, target: target) ? 10_000 : 0
         let titlePenalty: Double
         if let targetTitle, targetTitle.isEmpty == false, let title {
             titlePenalty = title.localizedCaseInsensitiveContains(targetTitle) ? 0 : 1_000
         } else {
             titlePenalty = 0
         }
-        return framePenalty + titlePenalty
+        return framePenalty + titlePenalty + transientPenalty
+    }
+
+    private func isLikelyTransientChromeWindow(title: String?, geometry: WindowGeometry, target: WindowGeometry) -> Bool {
+        let normalizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if normalizedTitle.contains("who's using chrome") || normalizedTitle == "profiles" {
+            return true
+        }
+
+        if normalizedTitle.isEmpty == false {
+            return false
+        }
+
+        let widthThreshold = max(700, target.width * 0.75)
+        let heightThreshold = max(700, target.height * 0.75)
+        return geometry.width < widthThreshold || geometry.height < heightThreshold
     }
 
     private func frame(for window: AXUIElement) -> WindowGeometry? {

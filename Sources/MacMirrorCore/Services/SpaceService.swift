@@ -1,4 +1,5 @@
 import ApplicationServices
+import Darwin
 import Foundation
 
 public struct SpacesLayout: Sendable {
@@ -47,10 +48,32 @@ public struct SpacesLayout: Sendable {
     }
 }
 
+struct SpaceHotkey: Equatable, Sendable {
+    let keyCode: Int
+    let modifiers: Int
+}
+
+private typealias SkyLightConnectionID = UInt32
+private typealias SkyLightMainConnectionIDFunction = @convention(c) () -> SkyLightConnectionID
+private typealias SkyLightCopyManagedDisplaySpacesFunction = @convention(c) (SkyLightConnectionID) -> Unmanaged<CFArray>?
+private typealias SkyLightManagedDisplaySetCurrentSpaceFunction = @convention(c) (SkyLightConnectionID, CFString, UInt64) -> Int32
+private typealias SkyLightCopySpacesForWindowsFunction = @convention(c) (SkyLightConnectionID, Int32, CFArray) -> Unmanaged<CFArray>?
+
+private struct SkyLightFunctions {
+    let mainConnectionID: SkyLightMainConnectionIDFunction
+    let copyManagedDisplaySpaces: SkyLightCopyManagedDisplaySpacesFunction
+    let managedDisplaySetCurrentSpace: SkyLightManagedDisplaySetCurrentSpaceFunction
+    let copySpacesForWindows: SkyLightCopySpacesForWindowsFunction
+}
+
 public final class SpaceService: Sendable {
     public init() {}
 
     public func currentLayout() throws -> SpacesLayout {
+        if let skyLightLayout = try loadSkyLightLayout() {
+            return skyLightLayout
+        }
+
         let result = try Shell.run("/usr/bin/defaults", arguments: ["export", "com.apple.spaces", "-"])
         guard result.exitCode == 0 else {
             throw MacMirrorError.commandFailed(result.stderr.isEmpty ? "Unable to read com.apple.spaces." : result.stderr)
@@ -118,6 +141,10 @@ public final class SpaceService: Sendable {
     }
 
     public func validateNavigationShortcuts() throws {
+        if skyLightFunctions != nil {
+            return
+        }
+
         let result = try Shell.run("/usr/bin/defaults", arguments: ["export", "com.apple.symbolichotkeys", "-"])
         guard result.exitCode == 0 else {
             throw MacMirrorError.commandFailed(result.stderr.isEmpty ? "Unable to read space navigation shortcuts." : result.stderr)
@@ -136,8 +163,8 @@ public final class SpaceService: Sendable {
         guard let hotkeys = plist?["AppleSymbolicHotKeys"] as? [String: Any] else {
             return false
         }
-        return hotkeyEnabled("79", expectedKeyCode: 123, hotkeys: hotkeys) &&
-            hotkeyEnabled("81", expectedKeyCode: 124, hotkeys: hotkeys)
+        return hotkeyDescriptor("79", expectedKeyCode: 123, hotkeys: hotkeys) != nil &&
+            hotkeyDescriptor("81", expectedKeyCode: 124, hotkeys: hotkeys) != nil
     }
 
     public func mapMonitorsToDisplays(
@@ -223,7 +250,8 @@ public final class SpaceService: Sendable {
         currentDisplays: [DisplaySignature],
         discoveredWindowsProvider: () -> [DiscoveredWindow]
     ) throws -> SpacesLayout.Space {
-        try validateNavigationShortcuts()
+        let hotkeyPlist = try symbolicHotkeyPlist()
+        let navigationHotkeys = try navigationHotkeys(in: hotkeyPlist)
 
         var layout = try currentLayout()
         var monitorMappings = mapMonitorsToDisplays(
@@ -246,9 +274,75 @@ public final class SpaceService: Sendable {
             return targetSpace
         }
 
+        if try switchViaSkyLight(to: targetSpace, on: monitor) {
+            layout = try currentLayout()
+            monitorMappings = mapMonitorsToDisplays(
+                layout: layout,
+                currentDisplays: currentDisplays,
+                discoveredWindows: discoveredWindowsProvider()
+            )
+
+            if currentSpace(on: displayID, mappings: monitorMappings) == targetSpace {
+                Logger.log(
+                    "Private Space API switch reached Desktop \(targetSpace.index) on \(monitor.displayIdentifier)."
+                )
+                return targetSpace
+            }
+
+            Logger.log(
+                """
+                Private Space API switch did not verify Desktop \(targetSpace.index). \
+                Current desktop is \(currentSpace(on: displayID, mappings: monitorMappings)?.index ?? 0).
+                """
+            )
+        }
+
         if layout.usesSeparateSpaces,
            let display = currentDisplays.first(where: { $0.stableIdentifier == displayID }) {
             try focus(display: display)
+        }
+
+        if let directHotkey = directDesktopHotkey(for: targetSpace.index, in: hotkeyPlist) {
+            Logger.log(
+                "Using direct desktop hotkey for Desktop \(targetSpace.index): keyCode=\(directHotkey.keyCode) modifiers=\(directHotkey.modifiers)"
+            )
+            let directAttempts = 3
+            for attempt in 1...directAttempts {
+                try sendHotkey(directHotkey)
+                Thread.sleep(forTimeInterval: 0.45)
+
+                layout = try currentLayout()
+                monitorMappings = mapMonitorsToDisplays(
+                    layout: layout,
+                    currentDisplays: currentDisplays,
+                    discoveredWindows: discoveredWindowsProvider()
+                )
+
+                if currentSpace(on: displayID, mappings: monitorMappings) == targetSpace {
+                    return targetSpace
+                }
+                Logger.log(
+                    "Direct desktop hotkey attempt \(attempt) did not reach Desktop \(targetSpace.index). Current desktop is \(currentSpace(on: displayID, mappings: monitorMappings)?.index ?? 0)."
+                )
+            }
+        }
+
+        if try switchViaMissionControl(to: targetSpace.index) {
+            layout = try currentLayout()
+            monitorMappings = mapMonitorsToDisplays(
+                layout: layout,
+                currentDisplays: currentDisplays,
+                discoveredWindows: discoveredWindowsProvider()
+            )
+
+            if currentSpace(on: displayID, mappings: monitorMappings) == targetSpace {
+                Logger.log("Mission Control switch reached Desktop \(targetSpace.index).")
+                return targetSpace
+            }
+
+            Logger.log(
+                "Mission Control fallback did not reach Desktop \(targetSpace.index). Current desktop is \(currentSpace(on: displayID, mappings: monitorMappings)?.index ?? 0)."
+            )
         }
 
         let maximumSteps = max(12, targetSpace.index + 2)
@@ -262,8 +356,8 @@ public final class SpaceService: Sendable {
                 return targetSpace
             }
 
-            let keyCode = targetSpace.index > currentSpace.index ? 124 : 123
-            try sendKeyCode(keyCode, modifiers: ["control down"])
+            let hotkey = targetSpace.index > currentSpace.index ? navigationHotkeys.right : navigationHotkeys.left
+            try sendHotkey(hotkey)
             Thread.sleep(forTimeInterval: 0.45)
 
             layout = try currentLayout()
@@ -322,11 +416,11 @@ public final class SpaceService: Sendable {
         return space.index == window.spaceIndex
     }
 
-    private func hotkeyEnabled(
+    private func hotkeyDescriptor(
         _ key: String,
         expectedKeyCode: Int,
         hotkeys: [String: Any]
-    ) -> Bool {
+    ) -> SpaceHotkey? {
         guard
             let entry = hotkeys[key] as? [String: Any],
             let enabled = entry["enabled"] as? Bool,
@@ -335,10 +429,17 @@ public final class SpaceService: Sendable {
             let parameters = value["parameters"] as? [NSNumber],
             parameters.count >= 2
         else {
-            return false
+            return nil
         }
 
-        return parameters[1].intValue == expectedKeyCode
+        guard parameters[1].intValue == expectedKeyCode else {
+            return nil
+        }
+
+        return SpaceHotkey(
+            keyCode: parameters[1].intValue,
+            modifiers: parameters.count >= 3 ? parameters[2].intValue : 0
+        )
     }
 
     private func focus(display: DisplaySignature) throws {
@@ -370,17 +471,147 @@ public final class SpaceService: Sendable {
         Thread.sleep(forTimeInterval: 0.2)
     }
 
-    private func sendKeyCode(_ keyCode: Int, modifiers: [String]) throws {
-        let modifierList = modifiers.joined(separator: ", ")
-        let source = """
-        tell application "System Events"
-            key code \(keyCode) using {\(modifierList)}
-        end tell
-        """
-        let result = try Shell.run("/usr/bin/osascript", arguments: ["-e", source])
-        guard result.exitCode == 0 else {
-            throw MacMirrorError.commandFailed(result.stderr.isEmpty ? "Failed to send Desktop shortcut." : result.stderr)
+    private func sendHotkey(_ hotkey: SpaceHotkey) throws {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(hotkey.keyCode),
+                keyDown: true
+              ),
+              let keyUp = CGEvent(
+                keyboardEventSource: source,
+                virtualKey: CGKeyCode(hotkey.keyCode),
+                keyDown: false
+              )
+        else {
+            throw MacMirrorError.commandFailed("Failed to create Desktop shortcut events.")
         }
+
+        let flags = cgEventFlags(from: hotkey.modifiers)
+        keyDown.flags = flags
+        keyUp.flags = flags
+        keyDown.post(tap: .cghidEventTap)
+        usleep(50_000)
+        keyUp.post(tap: .cghidEventTap)
+    }
+
+    private var skyLightFunctions: SkyLightFunctions? {
+        SkyLightLoader.shared
+    }
+
+    private func loadSkyLightLayout() throws -> SpacesLayout? {
+        guard let skyLight = skyLightFunctions else {
+            return nil
+        }
+
+        let connection = skyLight.mainConnectionID()
+        guard let rawMonitors = skyLight.copyManagedDisplaySpaces(connection)?.takeRetainedValue() as? [[String: Any]] else {
+            return nil
+        }
+
+        let monitors = parseSkyLightMonitors(rawMonitors)
+        let spaceLookup: [Int: (String, SpacesLayout.Space)] = Dictionary(uniqueKeysWithValues: monitors.flatMap { monitor in
+            monitor.spaces.compactMap { space in
+                guard let id64 = space.id64 else {
+                    return nil
+                }
+                return (id64, (monitor.displayIdentifier, space))
+            }
+        })
+
+        let rawWindows = (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? [])
+        let windowNumbers = rawWindows.compactMap { raw -> Int? in
+            guard let windowNumber = raw[kCGWindowNumber as String] as? Int else {
+                return nil
+            }
+            return windowNumber
+        }
+
+        var windowAssignments: [Int: SpacesLayout.WindowAssignment] = [:]
+        for windowNumber in windowNumbers {
+            guard
+                let spaceIDs = skyLight.copySpacesForWindows(
+                    connection,
+                    7,
+                    [NSNumber(value: windowNumber)] as CFArray
+                )?.takeRetainedValue() as? [NSNumber],
+                let spaceID = spaceIDs.first?.intValue,
+                let assignment = spaceLookup[spaceID]
+            else {
+                continue
+            }
+
+            windowAssignments[windowNumber] = SpacesLayout.WindowAssignment(
+                displayIdentifier: assignment.0,
+                space: assignment.1
+            )
+        }
+
+        return SpacesLayout(
+            monitors: monitors,
+            windowAssignments: windowAssignments,
+            usesSeparateSpaces: rawMonitors.count > 1
+        )
+    }
+
+    private func parseSkyLightMonitors(_ rawMonitors: [[String: Any]]) -> [SpacesLayout.Monitor] {
+        rawMonitors.map { monitor in
+            let displayIdentifier = monitor["Display Identifier"] as? String ?? "Main"
+            let rawCurrentSpace = monitor["Current Space"] as? [String: Any]
+            let currentSpaceID = numericSpaceIdentifier(in: rawCurrentSpace)
+            let spaces = (monitor["Spaces"] as? [[String: Any]] ?? []).enumerated().map { index, rawSpace in
+                SpacesLayout.Space(
+                    index: index + 1,
+                    uuid: normalizeUUID(rawSpace["uuid"] as? String),
+                    id64: numericSpaceIdentifier(in: rawSpace)
+                )
+            }
+            let currentSpace = spaces.first(where: { $0.id64 == currentSpaceID })
+            return SpacesLayout.Monitor(
+                displayIdentifier: displayIdentifier,
+                currentSpace: currentSpace,
+                spaces: spaces
+            )
+        }
+    }
+
+    private func numericSpaceIdentifier(in rawSpace: [String: Any]?) -> Int? {
+        if let id64 = (rawSpace?["id64"] as? NSNumber)?.intValue {
+            return id64
+        }
+        if let managedSpaceID = (rawSpace?["ManagedSpaceID"] as? NSNumber)?.intValue {
+            return managedSpaceID
+        }
+        return nil
+    }
+
+    private func switchViaSkyLight(
+        to targetSpace: SpacesLayout.Space,
+        on monitor: SpacesLayout.Monitor
+    ) throws -> Bool {
+        guard let targetSpaceID = targetSpace.id64, let skyLight = skyLightFunctions else {
+            return false
+        }
+
+        let connection = skyLight.mainConnectionID()
+        let result = skyLight.managedDisplaySetCurrentSpace(
+            connection,
+            monitor.displayIdentifier as CFString,
+            UInt64(targetSpaceID)
+        )
+        Logger.log(
+            """
+            Attempted private Space API switch display=\(monitor.displayIdentifier) \
+            targetSpaceID=\(targetSpaceID) desktopIndex=\(targetSpace.index) rc=\(result)
+            """
+        )
+
+        guard result == 0 else {
+            return false
+        }
+
+        Thread.sleep(forTimeInterval: 0.45)
+        return true
     }
 
     private func normalizeUUID(_ rawValue: String?) -> String? {
@@ -390,4 +621,178 @@ public final class SpaceService: Sendable {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
+
+    private func symbolicHotkeyPlist() throws -> [String: Any]? {
+        let result = try Shell.run("/usr/bin/defaults", arguments: ["export", "com.apple.symbolichotkeys", "-"])
+        guard result.exitCode == 0 else {
+            throw MacMirrorError.commandFailed(result.stderr.isEmpty ? "Unable to read space navigation shortcuts." : result.stderr)
+        }
+
+        let data = Data(result.stdout.utf8)
+        return try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+    }
+
+    private func navigationHotkeys(in plist: [String: Any]?) throws -> (left: SpaceHotkey, right: SpaceHotkey) {
+        guard let hotkeys = plist?["AppleSymbolicHotKeys"] as? [String: Any],
+              let left = hotkeyDescriptor("79", expectedKeyCode: 123, hotkeys: hotkeys),
+              let right = hotkeyDescriptor("81", expectedKeyCode: 124, hotkeys: hotkeys) else {
+            throw MacMirrorError.unsupportedOperation(
+                "Desktop navigation shortcuts are unavailable. Enable Mission Control's 'Move left a space' and 'Move right a space' shortcuts, then try again."
+            )
+        }
+        return (left, right)
+    }
+
+    func directDesktopHotkey(for desktopIndex: Int, in plist: [String: Any]?) -> SpaceHotkey? {
+        guard (1...9).contains(desktopIndex),
+              let hotkeys = plist?["AppleSymbolicHotKeys"] as? [String: Any] else {
+            return nil
+        }
+
+        let key = String(117 + desktopIndex)
+        let expectedKeyCode = 17 + desktopIndex
+        return hotkeyDescriptor(key, expectedKeyCode: expectedKeyCode, hotkeys: hotkeys)
+    }
+
+    func cgEventFlags(from modifiers: Int) -> CGEventFlags {
+        var flags: CGEventFlags = []
+
+        if modifiers & 0x1_0000 != 0 {
+            flags.insert(.maskAlphaShift)
+        }
+        if modifiers & 0x2_0000 != 0 {
+            flags.insert(.maskShift)
+        }
+        if modifiers & 0x4_0000 != 0 {
+            flags.insert(.maskControl)
+        }
+        if modifiers & 0x8_0000 != 0 {
+            flags.insert(.maskAlternate)
+        }
+        if modifiers & 0x10_0000 != 0 {
+            flags.insert(.maskCommand)
+        }
+        if modifiers & 0x20_0000 != 0 {
+            flags.insert(.maskNumericPad)
+        }
+        if modifiers & 0x40_0000 != 0 {
+            flags.insert(.maskHelp)
+        }
+        if modifiers & 0x80_0000 != 0 {
+            flags.insert(.maskSecondaryFn)
+        }
+
+        return flags
+    }
+
+    private func switchViaMissionControl(to desktopIndex: Int) throws -> Bool {
+        let desktopName = "Desktop \(desktopIndex)"
+        Logger.log("Attempting Mission Control fallback for \(desktopName).")
+
+        let openResult = try Shell.run("/usr/bin/open", arguments: ["-a", "Mission Control"])
+        guard openResult.exitCode == 0 else {
+            Logger.log("Mission Control open failed: \(openResult.stderr)")
+            return false
+        }
+
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            if let frame = try missionControlButtonFrame(named: desktopName) {
+                let clickPoint = CGPoint(x: frame.midX, y: frame.midY)
+                try click(point: clickPoint)
+                Thread.sleep(forTimeInterval: 0.9)
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.15)
+        }
+
+        Logger.log("Mission Control fallback could not find button \(desktopName).")
+        return false
+    }
+
+    private func missionControlButtonFrame(named desktopName: String) throws -> CGRect? {
+        let script = """
+        tell application "System Events"
+            tell process "Dock"
+                if not (exists group "Mission Control") then return ""
+                set desktopButton to button "\(desktopName)" of list 1 of group "Spaces Bar" of UI element 1 of group "Mission Control"
+                set p to position of desktopButton
+                set s to size of desktopButton
+                return (item 1 of p as string) & "," & (item 2 of p as string) & "," & (item 1 of s as string) & "," & (item 2 of s as string)
+            end tell
+        end tell
+        """
+
+        let result = try Shell.run("/usr/bin/osascript", arguments: ["-e", script])
+        guard result.exitCode == 0 else {
+            return nil
+        }
+
+        let parts = result.stdout
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: ",")
+            .compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard parts.count == 4 else {
+            return nil
+        }
+
+        return CGRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
+    }
+
+    private func click(point: CGPoint) throws {
+        CGWarpMouseCursorPosition(point)
+        guard
+            let mouseDown = CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            ),
+            let mouseUp = CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseUp,
+                mouseCursorPosition: point,
+                mouseButton: .left
+            )
+        else {
+            throw MacMirrorError.commandFailed("Unable to click Mission Control desktop button.")
+        }
+
+        mouseDown.post(tap: .cghidEventTap)
+        usleep(50_000)
+        mouseUp.post(tap: .cghidEventTap)
+    }
+}
+
+private enum SkyLightLoader {
+    static let shared: SkyLightFunctions? = {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW) else {
+            return nil
+        }
+
+        guard
+            let mainConnectionIDSymbol = dlsym(handle, "CGSMainConnectionID"),
+            let copyManagedDisplaySpacesSymbol = dlsym(handle, "CGSCopyManagedDisplaySpaces"),
+            let managedDisplaySetCurrentSpaceSymbol = dlsym(handle, "CGSManagedDisplaySetCurrentSpace"),
+            let copySpacesForWindowsSymbol = dlsym(handle, "CGSCopySpacesForWindows")
+        else {
+            return nil
+        }
+
+        return SkyLightFunctions(
+            mainConnectionID: unsafeBitCast(mainConnectionIDSymbol, to: SkyLightMainConnectionIDFunction.self),
+            copyManagedDisplaySpaces: unsafeBitCast(
+                copyManagedDisplaySpacesSymbol,
+                to: SkyLightCopyManagedDisplaySpacesFunction.self
+            ),
+            managedDisplaySetCurrentSpace: unsafeBitCast(
+                managedDisplaySetCurrentSpaceSymbol,
+                to: SkyLightManagedDisplaySetCurrentSpaceFunction.self
+            ),
+            copySpacesForWindows: unsafeBitCast(
+                copySpacesForWindowsSymbol,
+                to: SkyLightCopySpacesForWindowsFunction.self
+            )
+        )
+    }()
 }

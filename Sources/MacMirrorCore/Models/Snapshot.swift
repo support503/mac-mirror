@@ -31,7 +31,40 @@ public struct Snapshot: Codable, Hashable, Identifiable, Sendable {
     }
 
     public var usesLegacySpaceFallback: Bool {
-        windowTargets.contains { $0.targetSpaceUUID == nil }
+        windowTargets.contains {
+            $0.targetSpaceIndex > 1 && $0.targetSpaceUUID == nil
+        }
+    }
+
+    public var targetCount: Int {
+        windowTargets.count
+    }
+
+    public var chromeTargetCount: Int {
+        windowTargets.filter { $0.kind == .chromeProfile }.count
+    }
+
+    public var applicationTargetCount: Int {
+        windowTargets.filter { $0.kind == .applicationWindow }.count
+    }
+
+    public var shortTargetSummary: String {
+        "\(targetCount) \(pluralized("target", count: targetCount)) • \(chromeTargetCount) Chrome"
+    }
+
+    public var detailedTargetSummary: String {
+        var parts = [
+            "\(targetCount) \(pluralized("target", count: targetCount))",
+            "\(chromeTargetCount) Chrome",
+        ]
+        if applicationTargetCount > 0 {
+            parts.append("\(applicationTargetCount) app \(pluralized("window", count: applicationTargetCount))")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    private func pluralized(_ word: String, count: Int) -> String {
+        count == 1 ? word : "\(word)s"
     }
 }
 

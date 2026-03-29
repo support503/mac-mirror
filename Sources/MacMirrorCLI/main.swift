@@ -57,7 +57,7 @@ struct MacMirrorCLI {
                 settings.pinnedSnapshotID = snapshot.id
             }
             try environment.snapshotStore.saveSettings(settings)
-            print("Saved snapshot '\(snapshot.name)' (\(snapshot.id.uuidString)).")
+            print("Saved snapshot '\(snapshot.name)' (\(snapshot.id.uuidString)) with \(snapshot.detailedTargetSummary).")
 
         case "list":
             let settings = try environment.snapshotStore.loadSettings()
@@ -69,17 +69,17 @@ struct MacMirrorCLI {
 
             for snapshot in snapshots {
                 let pinned = settings.pinnedSnapshotID == snapshot.id ? "*" : " "
-                print("\(pinned) \(snapshot.name)\t\(snapshot.id.uuidString)\t\(snapshot.updatedAt.ISO8601Format())")
+                print("\(pinned) \(snapshot.name)\t\(snapshot.id.uuidString)\t\(snapshot.updatedAt.ISO8601Format())\t\(snapshot.detailedTargetSummary)")
             }
 
         case "restore":
             if arguments.count == 1 {
-                try environment.restoreCoordinator.restorePinnedSnapshot()
-                print("Pinned snapshot restored.")
+                let report = try environment.restoreCoordinator.restorePinnedSnapshot()
+                printRestoreReport(report)
             } else {
                 let name = arguments.dropFirst().joined(separator: " ")
-                try environment.restoreCoordinator.restoreSnapshot(named: name)
-                print("Restored snapshot '\(name)'.")
+                let report = try environment.restoreCoordinator.restoreSnapshot(named: name)
+                printRestoreReport(report)
             }
 
         case "pin":
@@ -89,6 +89,24 @@ struct MacMirrorCLI {
             let value = arguments.dropFirst().joined(separator: " ")
             try environment.snapshotStore.pinSnapshot(idOrName: value)
             print("Pinned '\(value)'.")
+
+        case "delete":
+            guard arguments.count >= 2 else {
+                throw CLIError.invalidUsage("Usage: mac-mirror snapshot delete <name-or-id>")
+            }
+            let value = arguments.dropFirst().joined(separator: " ")
+            let snapshot = try environment.snapshotStore.loadSnapshot(idOrName: value)
+            try environment.snapshotStore.deleteSnapshot(idOrName: value)
+
+            var settings = try environment.snapshotStore.loadSettings()
+            if settings.pinnedSnapshotID == snapshot.id {
+                settings.pinnedSnapshotID = nil
+            }
+            if settings.lastSavedSnapshotID == snapshot.id {
+                settings.lastSavedSnapshotID = nil
+            }
+            try environment.snapshotStore.saveSettings(settings)
+            print("Deleted '\(snapshot.name)'.")
 
         case "export":
             guard arguments.count >= 2 else {
@@ -111,7 +129,7 @@ struct MacMirrorCLI {
             }
             let url = URL(fileURLWithPath: arguments[1]).standardizedFileURL
             let snapshot = try environment.snapshotStore.importSnapshot(from: url)
-            print("Imported snapshot '\(snapshot.name)' (\(snapshot.id.uuidString)).")
+            print("Imported snapshot '\(snapshot.name)' (\(snapshot.id.uuidString)) with \(snapshot.detailedTargetSummary).")
 
         default:
             throw CLIError.invalidUsage("Unknown snapshot subcommand: \(command)")
@@ -159,6 +177,13 @@ struct MacMirrorCLI {
         print("automation\t\(status.automationAvailable)")
     }
 
+    private static func printRestoreReport(_ report: RestoreReport) {
+        print(report.summaryLine)
+        for failure in report.failedTargets {
+            print("Failed: \(failure.targetDescription) - \(failure.message ?? "Unknown error")")
+        }
+    }
+
     private static func printHelp() {
         print(
             """
@@ -169,6 +194,7 @@ struct MacMirrorCLI {
               mac-mirror snapshot list
               mac-mirror snapshot restore [name-or-id]
               mac-mirror snapshot pin <name-or-id>
+              mac-mirror snapshot delete <name-or-id>
               mac-mirror snapshot export <path> [name-or-id]
               mac-mirror snapshot import <path>
               mac-mirror launch-agent <enable|disable|status>

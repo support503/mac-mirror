@@ -9,8 +9,11 @@ struct MacMirrorLogin {
         Thread.sleep(forTimeInterval: 5)
 
         do {
-            try environment.restoreCoordinator.restorePinnedSnapshot()
-            Logger.log("Pinned snapshot restore complete.")
+            let report = try environment.restoreCoordinator.restorePinnedSnapshot()
+            Logger.log("Pinned snapshot restore complete. \(report.summaryLine)")
+            for failure in report.failedTargets {
+                Logger.log("Pinned snapshot restore failure \(failure.targetDescription): \(failure.message ?? "Unknown error")")
+            }
         } catch {
             Logger.log("Pinned snapshot restore failed: \(error.localizedDescription)")
             fputs("mac-mirror-login: \(error.localizedDescription)\n", stderr)
