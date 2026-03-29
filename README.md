@@ -36,7 +36,7 @@ swift run mac-mirror snapshot list
 
 ## Install From GitHub Releases
 
-Each Mac can install from a private GitHub Release instead of building from source:
+Each Mac can install from a GitHub Release instead of building from source:
 
 1. Download the latest `MacMirror-<version>.zip` release asset.
 2. Unzip it.
@@ -54,7 +54,7 @@ Snapshots remain local in `~/Library/Application Support/MacMirror`, so installi
 - If launch-at-login was already enabled, the helper path stays stable and your existing setup should continue working.
 - Re-save older snapshots after updating if you want exact desktop-by-desktop restore instead of the legacy index-only fallback.
 
-The menu bar app also includes a `Check for Updates` action that opens the private releases page in your browser.
+The menu bar app also includes a `Check for Updates` action that opens the releases page in your browser.
 
 ## Packaging
 

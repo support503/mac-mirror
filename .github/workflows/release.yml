@@ -16,13 +16,18 @@ permissions:
 
 jobs:
   build-release:
-    runs-on: macos-latest
+    runs-on: macos-15
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
 
       - name: Resolve release metadata
         id: meta
@@ -38,15 +43,35 @@ jobs:
             verify_tag="true"
           fi
 
+          target_commitish="$(git rev-list -n 1 "${tag}" 2>/dev/null || printf '%s' "${GITHUB_SHA}")"
+
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "verify_tag=${verify_tag}" >> "$GITHUB_OUTPUT"
+          echo "target_commitish=${target_commitish}" >> "$GITHUB_OUTPUT"
 
       - name: Build and package release
         run: |
           MAC_MIRROR_VERSION="${{ steps.meta.outputs.version }}" \
           MAC_MIRROR_BUILD="${{ github.run_number }}" \
           ./Scripts/package-release.sh
+
+      - name: Generate release notes
+        id: notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes_path="${RUNNER_TEMP}/release-notes.md"
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f tag_name="${{ steps.meta.outputs.tag }}" \
+            -f target_commitish="${{ steps.meta.outputs.target_commitish }}" \
+            --jq '.body' > "$notes_path"
+
+          echo "path=${notes_path}" >> "$GITHUB_OUTPUT"
 
       - name: Publish or update GitHub release
         shell: bash
@@ -58,8 +83,13 @@ jobs:
           zip_path="dist/release/MacMirror-${version}.zip"
           workflow_path="dist/release/MacMirror-${version}.alfredworkflow"
           checksums_path="dist/release/MacMirror-${version}-checksums.txt"
+          notes_path="${{ steps.notes.outputs.path }}"
 
           if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" \
+              --title "Mac Mirror $version" \
+              --notes-file "$notes_path" \
+              --latest
             gh release upload "$tag" "$zip_path" "$workflow_path" "$checksums_path" --clobber
             exit 0
           fi
@@ -70,14 +100,14 @@ jobs:
             "$workflow_path"
             "$checksums_path"
             --title "Mac Mirror $version"
-            --generate-notes
+            --notes-file "$notes_path"
             --latest
           )
 
           if [[ "${{ steps.meta.outputs.verify_tag }}" == "true" ]]; then
             args+=(--verify-tag)
           else
-            args+=(--target "${GITHUB_SHA}")
+            args+=(--target "${{ steps.meta.outputs.target_commitish }}")
           fi
 
           gh "${args[@]}"
