@@ -19,22 +19,30 @@ patterns=(
   'robert dawson'
 )
 
-files=("${(@f)$(git ls-files | rg -v '^Scripts/privacy-audit\.sh$')}")
+if command -v rg >/dev/null 2>&1; then
+  files=("${(@f)$(git ls-files | rg -v '^Scripts/privacy-audit\.sh$')}")
+  search_tool=(rg -n -i --)
+else
+  files=("${(@f)$(git ls-files | grep -Ev '^Scripts/privacy-audit\.sh$')}")
+  search_tool=(grep -E -n -i --)
+fi
+
 if (( ${#files[@]} == 0 )); then
   echo "No tracked files to audit."
   exit 0
 fi
 
 exit_code=0
+audit_output="/tmp/mac-mirror-privacy-audit.txt"
 for pattern in "${patterns[@]}"; do
-  if rg -n -i --glob '!dist/**' --glob '!.build/**' --glob '!Extras/Alfred/build/**' -- "${pattern}" "${files[@]}" >/tmp/mac-mirror-privacy-audit.txt 2>/dev/null; then
+  if "${search_tool[@]}" "${pattern}" "${files[@]}" >"$audit_output" 2>/dev/null; then
     echo "Privacy audit failed for pattern: ${pattern}" >&2
-    cat /tmp/mac-mirror-privacy-audit.txt >&2
+    cat "$audit_output" >&2
     exit_code=1
   fi
 done
 
-rm -f /tmp/mac-mirror-privacy-audit.txt
+rm -f "$audit_output"
 
 if (( exit_code != 0 )); then
   exit "$exit_code"
