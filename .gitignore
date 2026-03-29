@@ -1,0 +1,12 @@
+.DS_Store
+.build/
+DerivedData/
+Packages/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+MacMirror.app/
+dist/
+Artifacts/
+LocalSnapshots/
+Extras/Alfred/build/

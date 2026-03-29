@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the leading v"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${{ github.event.inputs.version }}"
+            tag="v${version}"
+            verify_tag="false"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+            verify_tag="true"
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "verify_tag=${verify_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and package release
+        run: |
+          MAC_MIRROR_VERSION="${{ steps.meta.outputs.version }}" \
+          MAC_MIRROR_BUILD="${{ github.run_number }}" \
+          ./Scripts/package-release.sh
+
+      - name: Publish or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          version="${{ steps.meta.outputs.version }}"
+          zip_path="dist/release/MacMirror-${version}.zip"
+          workflow_path="dist/release/MacMirror-${version}.alfredworkflow"
+          checksums_path="dist/release/MacMirror-${version}-checksums.txt"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$zip_path" "$workflow_path" "$checksums_path" --clobber
+            exit 0
+          fi
+
+          args=(
+            release create "$tag"
+            "$zip_path"
+            "$workflow_path"
+            "$checksums_path"
+            --title "Mac Mirror $version"
+            --generate-notes
+            --latest
+          )
+
+          if [[ "${{ steps.meta.outputs.verify_tag }}" == "true" ]]; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "${GITHUB_SHA}")
+          fi
+
+          gh "${args[@]}"

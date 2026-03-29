@@ -1,0 +1,35 @@
+name: MacMirror
+options:
+  bundleIdPrefix: com.macmirror
+targets:
+  MacMirror:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Sources/MacMirrorCore
+      - Sources/MacMirrorApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.macmirror.app
+        INFOPLIST_KEY_LSUIElement: YES
+  mac-mirror:
+    type: tool
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Sources/MacMirrorCore
+      - Sources/MacMirrorCLI
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.macmirror.cli
+  mac-mirror-login:
+    type: tool
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - Sources/MacMirrorCore
+      - Sources/MacMirrorLogin
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.macmirror.login
