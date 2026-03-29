@@ -82,8 +82,28 @@ The release script generates:
 The repo includes GitHub Actions workflows for CI and release automation.
 
 - CI runs `swift build` and `swift test` on pushes and pull requests.
+- CI also runs a privacy audit that checks tracked files for common secrets, private keys, absolute home-directory paths, and a few repo-specific PII patterns.
 - Release publishing runs on pushed tags like `v1.0.0` or from the Actions UI with a `version` input.
-- Release assets are uploaded to the private GitHub Releases page automatically.
+- Release assets are uploaded to the GitHub Releases page automatically.
+
+## Public Repo Hygiene
+
+Before pushing a public-facing change:
+
+- Run `./Scripts/privacy-audit.sh`.
+- Keep snapshots, logs, and machine-local data out of git.
+- Do not commit absolute local paths; use `$HOME/...` in examples and scripts instead.
+- Do not commit keys, tokens, exported credentials, or crash dumps.
+- Keep git author identity repo-local and neutral if you do not want personal metadata in commit history.
+- Rebuild release assets with `./Scripts/package-release.sh` so downloadable zips reflect the current clean state.
+
+Helpful commands:
+
+```bash
+./Scripts/privacy-audit.sh
+git config user.name "Mac Mirror"
+git config user.email "maintainer@example.invalid"
+```
 
 ## Permissions
 

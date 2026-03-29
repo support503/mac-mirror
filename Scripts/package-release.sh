@@ -25,6 +25,7 @@ cp -R "$DIST_DIR/MacMirror.app" "$PACKAGE_DIR/"
 cp "$ROOT_DIR/Scripts/install-app.sh" "$PACKAGE_DIR/$INSTALLER_NAME"
 chmod +x "$PACKAGE_DIR/$INSTALLER_NAME"
 cp "$WORKFLOW_SOURCE" "$WORKFLOW_ASSET"
+xattr -cr "$PACKAGE_DIR" >/dev/null 2>&1 || true
 
 cat > "$PACKAGE_DIR/README.txt" <<EOF
 Mac Mirror $VERSION
@@ -42,7 +43,7 @@ Update:
 - The app refreshes its helper binaries the next time it launches
 EOF
 
-ditto -c -k --sequesterRsrc --keepParent "$PACKAGE_DIR" "$ZIP_PATH"
+COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc --noextattr --noacl --noqtn "$PACKAGE_DIR" "$ZIP_PATH"
 
 (
   cd "$RELEASE_DIR"

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK_DIR="$ROOT_DIR/Extras/Alfred/build/workflow-src"
 OUTPUT_DIR="$ROOT_DIR/Extras/Alfred/build"
-CLI_PATH="$HOME/Library/Application Support/MacMirror/bin/mac-mirror"
+CLI_PATH='$HOME/Library/Application Support/MacMirror/bin/mac-mirror'
 
 rm -rf "$WORK_DIR"
 rm -rf "$OUTPUT_DIR/Mac Mirror.alfredworkflow"
@@ -119,5 +119,5 @@ EOF
 
 mkdir -p "$OUTPUT_DIR"
 cd "$WORK_DIR"
-zip -r "$OUTPUT_DIR/Mac Mirror.alfredworkflow" . >/dev/null
+COPYFILE_DISABLE=1 zip -X -r "$OUTPUT_DIR/Mac Mirror.alfredworkflow" . >/dev/null
 echo "Built $OUTPUT_DIR/Mac Mirror.alfredworkflow"
