@@ -2,17 +2,20 @@ import Foundation
 
 public final class SnapshotCaptureService: Sendable {
     private let chromeProfileService: ChromeProfileService
+    private let chromeSessionMetadataService: ChromeSessionMetadataService
     private let displayService: DisplayService
     private let windowDiscoveryService: WindowDiscoveryService
     private let spaceService: SpaceService
 
     public init(
         chromeProfileService: ChromeProfileService = ChromeProfileService(),
+        chromeSessionMetadataService: ChromeSessionMetadataService = ChromeSessionMetadataService(),
         displayService: DisplayService = DisplayService(),
         windowDiscoveryService: WindowDiscoveryService = WindowDiscoveryService(),
         spaceService: SpaceService = SpaceService()
     ) {
         self.chromeProfileService = chromeProfileService
+        self.chromeSessionMetadataService = chromeSessionMetadataService
         self.displayService = displayService
         self.windowDiscoveryService = windowDiscoveryService
         self.spaceService = spaceService
@@ -30,7 +33,7 @@ public final class SnapshotCaptureService: Sendable {
         let displays = displayService.currentDisplays()
         let windows = windowDiscoveryService.discoverWindows()
         let runningApps = windowDiscoveryService.runningApplications()
-        let currentSpaceIndex = (try? spaceService.currentLayout().monitors.first?.currentSpaceIndex) ?? 1
+        let currentSpaceIndex = (try? spaceService.currentLayout().monitors.first?.currentSpace?.index) ?? 1
 
         var targets: [WindowTarget] = []
         targets += try captureChromeTargets(
@@ -62,22 +65,36 @@ public final class SnapshotCaptureService: Sendable {
         )
     }
 
-    private func captureChromeTargets(
+    func captureChromeTargets(
         displays: [DisplaySignature],
         discoveredWindows: [DiscoveredWindow],
         defaultSpaceIndex: Int
     ) throws -> [WindowTarget] {
         let profiles = try chromeProfileService.discoverProfiles()
+        let sessionMetadata = chromeSessionMetadataService.discoverWindowMetadata(
+            profileDirectories: profiles.map(\.profileDirectory)
+        )
         let chromeWindows = discoveredWindows.filter { $0.ownerName == "Google Chrome" }
-        let matches = matchChromeProfilesToWindows(profiles: profiles, windows: chromeWindows)
+        let metadataByProfile = Dictionary(uniqueKeysWithValues: sessionMetadata.map { ($0.profileDirectory, $0) })
+        let windowsByNumber = Dictionary(uniqueKeysWithValues: chromeWindows.map { ($0.windowNumber, $0) })
 
         return profiles.compactMap { profile in
-            let liveWindow = matches[profile.id]
-            let geometry = liveWindow?.frame ?? profile.windowPlacement
-            guard let geometry else { return nil }
-            let display = liveWindow.flatMap { liveWindow in
-                displays.first(where: { $0.stableIdentifier == liveWindow.displayID })
-            } ?? displayService.display(containing: geometry, displays: displays) ?? displays.first
+            guard let metadata = metadataByProfile[profile.profileDirectory] else {
+                Logger.log("Skipping Chrome profile \(profile.profileDirectory) because no live session metadata was found.")
+                return nil
+            }
+            guard let liveWindow = windowsByNumber[metadata.windowNumber] else {
+                Logger.log("Skipping Chrome profile \(profile.profileDirectory) because window \(metadata.windowNumber) is not currently open.")
+                return nil
+            }
+
+            let geometry = liveWindow.frame
+            let display = resolveDisplay(
+                for: liveWindow,
+                metadata: metadata,
+                displays: displays,
+                fallbackGeometry: geometry
+            )
 
             guard let display else { return nil }
 
@@ -88,12 +105,13 @@ public final class SnapshotCaptureService: Sendable {
                 executablePath: chromeProfileService.chromeApplicationURL.path,
                 chromeProfileID: profile.profileDirectory,
                 chromeProfileName: profile.name,
-                windowTitle: liveWindow?.windowTitle,
+                windowTitle: metadata.windowTitle ?? liveWindow.windowTitle,
                 launchOrder: 0,
                 geometry: geometry,
                 targetDisplayID: display.stableIdentifier,
                 targetDisplayName: display.localizedName,
-                targetSpaceIndex: liveWindow?.spaceIndex ?? defaultSpaceIndex,
+                targetSpaceIndex: liveWindow.spaceIndex ?? defaultSpaceIndex,
+                targetSpaceUUID: normalizedSpaceUUID(liveWindow.spaceUUID) ?? metadata.workspaceUUID,
                 isHidden: false,
                 isMinimized: false
             )
@@ -131,6 +149,7 @@ public final class SnapshotCaptureService: Sendable {
                     targetDisplayID: window.displayID ?? "main",
                     targetDisplayName: window.displayName ?? "Main",
                     targetSpaceIndex: window.spaceIndex ?? defaultSpaceIndex,
+                    targetSpaceUUID: normalizedSpaceUUID(window.spaceUUID),
                     isHidden: app.isHidden,
                     isMinimized: false
                 )
@@ -138,24 +157,28 @@ public final class SnapshotCaptureService: Sendable {
         }
     }
 
-    private func matchChromeProfilesToWindows(
-        profiles: [ChromeProfile],
-        windows: [DiscoveredWindow]
-    ) -> [String: DiscoveredWindow] {
-        var remainingWindows = windows
-        var output: [String: DiscoveredWindow] = [:]
-
-        for profile in profiles {
-            guard let placement = profile.windowPlacement else { continue }
-            let bestIndex = remainingWindows.enumerated().min { lhs, rhs in
-                lhs.element.frame.distance(to: placement) < rhs.element.frame.distance(to: placement)
-            }?.offset
-            if let bestIndex {
-                output[profile.profileDirectory] = remainingWindows.remove(at: bestIndex)
-            }
+    private func resolveDisplay(
+        for liveWindow: DiscoveredWindow,
+        metadata: ChromeSessionWindowMetadata,
+        displays: [DisplaySignature],
+        fallbackGeometry: WindowGeometry
+    ) -> DisplaySignature? {
+        if let displayID = liveWindow.displayID,
+           let display = displays.first(where: { $0.stableIdentifier == displayID }) {
+            return display
         }
 
-        return output
+        if let screenLayoutUUID = metadata.screenLayoutUUID,
+           let display = displays.first(where: { $0.stableIdentifier == screenLayoutUUID }) {
+            return display
+        }
+
+        if let frame = metadata.frame,
+           let display = displayService.display(containing: frame, displays: displays) {
+            return display
+        }
+
+        return displayService.display(containing: fallbackGeometry, displays: displays) ?? displays.first
     }
 
     private func targetSort(_ lhs: WindowTarget, _ rhs: WindowTarget) -> Bool {
@@ -170,10 +193,12 @@ public final class SnapshotCaptureService: Sendable {
         }
         return lhs.targetDisplayName.localizedCaseInsensitiveCompare(rhs.targetDisplayName) == .orderedAscending
     }
-}
 
-private extension WindowGeometry {
-    func distance(to other: WindowGeometry) -> Double {
-        abs(x - other.x) + abs(y - other.y) + abs(width - other.width) + abs(height - other.height)
+    private func normalizedSpaceUUID(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

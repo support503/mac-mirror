@@ -52,6 +52,7 @@ Snapshots remain local in `~/Library/Application Support/MacMirror`, so installi
 - Run `Install Mac Mirror.command` again.
 - Launch the app once after updating so it refreshes the bundled CLI and login helper in Application Support.
 - If launch-at-login was already enabled, the helper path stays stable and your existing setup should continue working.
+- Re-save older snapshots after updating if you want exact desktop-by-desktop restore instead of the legacy index-only fallback.
 
 The menu bar app also includes a `Check for Updates` action that opens the private releases page in your browser.
 

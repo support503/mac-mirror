@@ -3,6 +3,7 @@ import Foundation
 public struct AppEnvironment: Sendable {
     public let snapshotStore: SnapshotStore
     public let chromeProfileService: ChromeProfileService
+    public let chromeSessionMetadataService: ChromeSessionMetadataService
     public let displayService: DisplayService
     public let spaceService: SpaceService
     public let windowDiscoveryService: WindowDiscoveryService
@@ -15,12 +16,16 @@ public struct AppEnvironment: Sendable {
     public init() {
         let snapshotStore = SnapshotStore()
         let chromeProfileService = ChromeProfileService()
+        let chromeSessionMetadataService = ChromeSessionMetadataService(
+            chromeSupportDirectory: chromeProfileService.chromeSupportDirectory
+        )
         let displayService = DisplayService()
         let spaceService = SpaceService()
         let windowDiscoveryService = WindowDiscoveryService(displayService: displayService, spaceService: spaceService)
         let accessibilityWindowService = AccessibilityWindowService()
         let snapshotCaptureService = SnapshotCaptureService(
             chromeProfileService: chromeProfileService,
+            chromeSessionMetadataService: chromeSessionMetadataService,
             displayService: displayService,
             windowDiscoveryService: windowDiscoveryService,
             spaceService: spaceService
@@ -38,6 +43,7 @@ public struct AppEnvironment: Sendable {
 
         self.snapshotStore = snapshotStore
         self.chromeProfileService = chromeProfileService
+        self.chromeSessionMetadataService = chromeSessionMetadataService
         self.displayService = displayService
         self.spaceService = spaceService
         self.windowDiscoveryService = windowDiscoveryService

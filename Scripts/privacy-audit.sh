@@ -19,7 +19,7 @@ patterns=(
   'robert dawson'
 )
 
-files=("${(@f)$(git ls-files)}")
+files=("${(@f)$(git ls-files | rg -v '^Scripts/privacy-audit\.sh$')}")
 if (( ${#files[@]} == 0 )); then
   echo "No tracked files to audit."
   exit 0

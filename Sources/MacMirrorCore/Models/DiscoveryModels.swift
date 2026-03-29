@@ -40,6 +40,7 @@ public struct DiscoveredWindow: Hashable, Identifiable, Sendable {
     public let displayID: String?
     public let displayName: String?
     public let spaceIndex: Int?
+    public let spaceUUID: String?
 
     public init(
         pid: Int32,
@@ -51,7 +52,8 @@ public struct DiscoveredWindow: Hashable, Identifiable, Sendable {
         isOnscreen: Bool,
         displayID: String?,
         displayName: String?,
-        spaceIndex: Int?
+        spaceIndex: Int?,
+        spaceUUID: String?
     ) {
         self.pid = pid
         self.windowNumber = windowNumber
@@ -63,5 +65,6 @@ public struct DiscoveredWindow: Hashable, Identifiable, Sendable {
         self.displayID = displayID
         self.displayName = displayName
         self.spaceIndex = spaceIndex
+        self.spaceUUID = spaceUUID
     }
 }

@@ -238,6 +238,13 @@ final class AppViewModel: ObservableObject {
         snapshots.first(where: { $0.id == selectedSnapshotID }) ?? snapshots.first
     }
 
+    var selectedSnapshotNotice: String? {
+        guard selectedSnapshot?.usesLegacySpaceFallback == true else {
+            return nil
+        }
+        return "This snapshot predates exact desktop IDs. Re-save it for the most reliable desktop restore."
+    }
+
     var pinnedSnapshotName: String {
         snapshots.first(where: { $0.id == settings.pinnedSnapshotID })?.name ?? "None"
     }
@@ -428,6 +435,12 @@ struct SettingsWindowView: View {
                         }
                     }
                 }
+            }
+
+            if let notice = model.selectedSnapshotNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
 
             HStack {

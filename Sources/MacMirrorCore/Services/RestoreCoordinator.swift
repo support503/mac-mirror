@@ -45,32 +45,52 @@ public final class RestoreCoordinator: Sendable {
         let displayMappings = displayService.mapDisplays(saved: snapshot.displaySignatures, current: currentDisplays)
         var knownWindowNumbers = Set(windowDiscoveryService.discoverWindows().map(\.windowNumber))
 
+        if snapshot.usesLegacySpaceFallback {
+            Logger.log("Snapshot \(snapshot.name) is using legacy desktop indexes only. Re-save it for exact desktop restore.")
+        }
+
         for target in snapshot.windowTargets.sorted(by: { $0.launchOrder < $1.launchOrder }) {
-            try? spaceService.switchToSpace(target.targetSpaceIndex)
-            try launchTarget(target)
-            Thread.sleep(forTimeInterval: target.kind == .chromeProfile ? 1.3 : 0.8)
-            accessibilityWindowService.clickChromeRestoreButtonIfPresent()
-
-            let remappedGeometry = remapGeometry(target.geometry, for: target.targetDisplayID, using: displayMappings)
             var adjustedTarget = target
-            adjustedTarget.geometry = remappedGeometry
-
-            let window = windowDiscoveryService.waitForWindow(
-                bundleIdentifier: adjustedTarget.bundleIdentifier,
-                excluding: knownWindowNumbers,
-                targetGeometry: adjustedTarget.geometry
-            )
-
-            if let window {
-                knownWindowNumbers.insert(window.windowNumber)
+            if let mappedDisplay = displayMappings[target.targetDisplayID]?.current {
+                adjustedTarget.targetDisplayID = mappedDisplay.stableIdentifier
+                adjustedTarget.targetDisplayName = mappedDisplay.localizedName
             }
-
-            try accessibilityWindowService.applyWindowTarget(
-                adjustedTarget,
-                bundleIdentifier: adjustedTarget.bundleIdentifier,
-                referenceWindow: window
+            adjustedTarget.geometry = remapGeometry(
+                target.geometry,
+                for: target.targetDisplayID,
+                using: displayMappings
             )
-            Thread.sleep(forTimeInterval: 0.25)
+
+            let layout = try? spaceService.currentLayout()
+            let monitorMappings = layout.map {
+                spaceService.mapMonitorsToDisplays(
+                    layout: $0,
+                    currentDisplays: currentDisplays,
+                    discoveredWindows: windowDiscoveryService.discoverWindows()
+                )
+            }
+            let availableSpaces = monitorMappings?[adjustedTarget.targetDisplayID]?.spaces.map {
+                "\($0.index):\($0.uuid ?? "Desktop 1")"
+            }.joined(separator: ", ") ?? "unavailable"
+
+            Logger.log(
+                """
+                Restoring target kind=\(adjustedTarget.kind.rawValue) app=\(adjustedTarget.applicationName) \
+                display=\(adjustedTarget.targetDisplayID) savedSpaceIndex=\(adjustedTarget.targetSpaceIndex) \
+                savedSpaceUUID=\(adjustedTarget.targetSpaceUUID ?? "nil") availableSpaces=[\(availableSpaces)]
+                """
+            )
+
+            do {
+                try restoreTarget(
+                    adjustedTarget,
+                    currentDisplays: currentDisplays,
+                    knownWindowNumbers: &knownWindowNumbers
+                )
+            } catch {
+                Logger.log("Restore failed for \(adjustedTarget.applicationName): \(error.localizedDescription)")
+                throw error
+            }
         }
     }
 
@@ -133,5 +153,126 @@ public final class RestoreCoordinator: Sendable {
             height: min(geometry.height, currentRect.height),
             maximized: geometry.maximized
         )
+    }
+
+    private func restoreTarget(
+        _ target: WindowTarget,
+        currentDisplays: [DisplaySignature],
+        knownWindowNumbers: inout Set<Int>
+    ) throws {
+        let resolvedSpace = try spaceService.switchToSpace(
+            savedSpaceUUID: target.targetSpaceUUID,
+            savedSpaceIndex: target.targetSpaceIndex,
+            onDisplayID: target.targetDisplayID,
+            currentDisplays: currentDisplays
+        ) { [windowDiscoveryService] in
+            windowDiscoveryService.discoverWindows()
+        }
+        Logger.log(
+            "Resolved restore desktop for \(target.applicationName) -> index=\(resolvedSpace.index) uuid=\(resolvedSpace.uuid ?? "nil")"
+        )
+
+        try launchTarget(target)
+        Thread.sleep(forTimeInterval: target.kind == .chromeProfile ? 1.3 : 0.8)
+        accessibilityWindowService.clickChromeRestoreButtonIfPresent()
+
+        let window = windowDiscoveryService.waitForWindow(
+            bundleIdentifier: target.bundleIdentifier,
+            excluding: knownWindowNumbers,
+            targetGeometry: target.geometry
+        )
+        if let window {
+            knownWindowNumbers.insert(window.windowNumber)
+        }
+
+        try accessibilityWindowService.applyWindowTarget(
+            target,
+            bundleIdentifier: target.bundleIdentifier,
+            referenceWindow: window
+        )
+        Thread.sleep(forTimeInterval: 0.25)
+
+        if try verifyTargetSpace(target, resolvedSpace: resolvedSpace, referenceWindow: window) {
+            return
+        }
+
+        Logger.log("Desktop verification failed for \(target.applicationName). Retrying switch and placement once.")
+        _ = try spaceService.switchToSpace(
+            savedSpaceUUID: target.targetSpaceUUID,
+            savedSpaceIndex: target.targetSpaceIndex,
+            onDisplayID: target.targetDisplayID,
+            currentDisplays: currentDisplays
+        ) { [windowDiscoveryService] in
+            windowDiscoveryService.discoverWindows()
+        }
+
+        let retryWindow = verificationWindow(for: target, preferredWindowNumber: window?.windowNumber)
+        try accessibilityWindowService.applyWindowTarget(
+            target,
+            bundleIdentifier: target.bundleIdentifier,
+            referenceWindow: retryWindow ?? window
+        )
+        Thread.sleep(forTimeInterval: 0.25)
+
+        guard try verifyTargetSpace(target, resolvedSpace: resolvedSpace, referenceWindow: retryWindow ?? window) else {
+            throw MacMirrorError.commandFailed(
+                "Window restore verification failed for \(target.applicationName). Expected Desktop \(resolvedSpace.index) on \(target.targetDisplayName)."
+            )
+        }
+    }
+
+    private func verifyTargetSpace(
+        _ target: WindowTarget,
+        resolvedSpace: SpacesLayout.Space,
+        referenceWindow: DiscoveredWindow?
+    ) throws -> Bool {
+        let verifiedWindow = verificationWindow(for: target, preferredWindowNumber: referenceWindow?.windowNumber)
+        guard let verifiedWindow else {
+            throw MacMirrorError.commandFailed("Unable to verify the restored window for \(target.applicationName).")
+        }
+
+        let observedUUID = normalizeSpaceUUID(verifiedWindow.spaceUUID)
+        let expectedUUID = normalizeSpaceUUID(resolvedSpace.uuid ?? target.targetSpaceUUID)
+        let matchesExpectedSpace: Bool
+        if let expectedUUID {
+            matchesExpectedSpace = observedUUID == expectedUUID
+        } else {
+            matchesExpectedSpace = verifiedWindow.spaceIndex == resolvedSpace.index
+        }
+
+        Logger.log(
+            """
+            Verified target app=\(target.applicationName) window=\(verifiedWindow.windowNumber) \
+            observedSpaceIndex=\(verifiedWindow.spaceIndex ?? 0) observedSpaceUUID=\(observedUUID ?? "nil") \
+            expectedSpaceIndex=\(resolvedSpace.index) expectedSpaceUUID=\(expectedUUID ?? "nil")
+            """
+        )
+
+        return matchesExpectedSpace
+    }
+
+    private func verificationWindow(
+        for target: WindowTarget,
+        preferredWindowNumber: Int?
+    ) -> DiscoveredWindow? {
+        if let preferredWindowNumber,
+           let exact = windowDiscoveryService.discoverWindows().first(where: { $0.windowNumber == preferredWindowNumber }) {
+            return exact
+        }
+
+        return windowDiscoveryService.waitForWindow(
+            bundleIdentifier: target.bundleIdentifier,
+            excluding: [],
+            targetGeometry: target.geometry,
+            timeout: 2
+        )
+    }
+
+    private func normalizeSpaceUUID(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

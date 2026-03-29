@@ -29,6 +29,10 @@ public struct Snapshot: Codable, Hashable, Identifiable, Sendable {
         self.windowTargets = windowTargets
         self.notes = notes
     }
+
+    public var usesLegacySpaceFallback: Bool {
+        windowTargets.contains { $0.targetSpaceUUID == nil }
+    }
 }
 
 public enum WindowTargetKind: String, Codable, Hashable, Sendable {
@@ -66,6 +70,7 @@ public struct WindowTarget: Codable, Hashable, Identifiable, Sendable {
     public var targetDisplayID: String
     public var targetDisplayName: String
     public var targetSpaceIndex: Int
+    public var targetSpaceUUID: String?
     public var isHidden: Bool
     public var isMinimized: Bool
 
@@ -83,6 +88,7 @@ public struct WindowTarget: Codable, Hashable, Identifiable, Sendable {
         targetDisplayID: String,
         targetDisplayName: String,
         targetSpaceIndex: Int,
+        targetSpaceUUID: String? = nil,
         isHidden: Bool,
         isMinimized: Bool
     ) {
@@ -99,6 +105,7 @@ public struct WindowTarget: Codable, Hashable, Identifiable, Sendable {
         self.targetDisplayID = targetDisplayID
         self.targetDisplayName = targetDisplayName
         self.targetSpaceIndex = targetSpaceIndex
+        self.targetSpaceUUID = targetSpaceUUID
         self.isHidden = isHidden
         self.isMinimized = isMinimized
     }

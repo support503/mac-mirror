@@ -75,7 +75,8 @@ public final class WindowDiscoveryService: Sendable {
                 isOnscreen: (raw[kCGWindowIsOnscreen as String] as? Bool) ?? false,
                 displayID: display?.stableIdentifier,
                 displayName: display?.localizedName,
-                spaceIndex: spacesLayout?.windowToSpaceIndex[windowNumber]
+                spaceIndex: spacesLayout?.windowAssignments[windowNumber]?.space.index,
+                spaceUUID: spacesLayout?.windowAssignments[windowNumber]?.space.uuid
             )
         }
     }
